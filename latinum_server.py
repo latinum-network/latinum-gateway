@@ -17,7 +17,7 @@ async def startup():
     try:
         app.state.redis = await create_pool(RedisSettings(host="latinum-db", port=6379))
         count = await app.state.redis.llen("latinum:pending_shards")
-        print(f"✅ REFINERY ONLINE. Shards in queue: {count}")
+        print(f"✅ REFINERY ONLINE. Shards: {count}")
         asyncio.create_task(reclamation_worker())
     except Exception as e:
         print(f"❌ DATABASE STARTUP ERROR: {e}")
@@ -27,15 +27,17 @@ async def reclamation_worker():
         try:
             leases = await app.state.redis.smembers("latinum:processing_leases")
             now = int(time.time())
-            for lease in leases:
+            for lease_bytes in leases:
                 try:
+                    # CRITICAL FIX: Decode bytes to string
+                    lease = lease_bytes.decode('utf-8')
                     parts = lease.split(":", 2)
                     if len(parts) < 3: continue
                     timestamp, sig, shard_data = parts
                     if now - int(timestamp) > RECLAMATION_TIMEOUT:
                         print(f"⚠️ RECLAIMING: Shard from {sig} timed out.")
                         await app.state.redis.rpush("latinum:pending_shards", shard_data)
-                        await app.state.redis.srem("latinum:processing_leases", lease)
+                        await app.state.redis.srem("latinum:processing_leases", lease_bytes)
                 except Exception: continue
         except Exception as e: print(f"🛡️ WORKER ERROR: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
@@ -48,7 +50,7 @@ async def health():
 
 @app.get("/tasks/claim")
 async def claim_task(x_hardware_sig: str = Header(None)):
-    if not x_hardware_sig: raise HTTPException(status_code=400, detail="Header missing")
+    if not x_hardware_sig: raise HTTPException(status_code=400)
     shard_raw = await app.state.redis.lpop("latinum:pending_shards")
     if not shard_raw: return {"status": "idle"}
     
@@ -67,12 +69,14 @@ async def submit_task(payload: dict, x_hardware_sig: str = Header(None)):
     shard_id = payload.get("shard_id")
     
     leases = await app.state.redis.smembers("latinum:processing_leases")
-    for lease in leases:
-        # RESILIENT CHECK: Match Node ID and Shard ID regardless of formatting
-        if f":{x_hardware_sig}:" in lease and f'"{shard_id}"' in lease:
-            await app.state.redis.srem("latinum:processing_leases", lease)
+    for lease_bytes in leases:
+        # CRITICAL FIX: Decode Redis bytes to string for comparison
+        lease = lease_bytes.decode('utf-8')
+        
+        # Resilient Match: Node ID + Shard ID
+        if f":{x_hardware_sig}:" in lease and shard_id in lease:
+            await app.state.redis.srem("latinum:processing_leases", lease_bytes)
             print(f"✨ SUCCESS: {x_hardware_sig} finalized Shard {shard_id}")
             return {"status": "accepted", "shard_id": shard_id}
             
-    print(f"❌ REJECTED: No active lease for {shard_id} from {x_hardware_sig}")
     raise HTTPException(status_code=404, detail="Lease expired or not found.")
