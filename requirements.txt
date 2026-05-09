@@ -1,6 +1,5 @@
 fastapi
-uvicorn[standard]
-arq
+uvicorn
 redis
-pydantic
-python-dotenv
+arq
+psycopg2-binary
