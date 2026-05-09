@@ -4,7 +4,7 @@ import asyncio
 import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
 from arq import create_pool
 from arq.connections import RedisSettings
 
@@ -19,15 +19,14 @@ class WorkUnit(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    retry_count = 0
-    while retry_count < 5:
-        try:
-            app.state.redis = await create_pool(RedisSettings.from_dsn(REDIS_URL))
-            print("✅ Successfully connected to Latinum Redis Queue")
-            return
-        except:
-            retry_count += 1
-            await asyncio.sleep(2)
+    if not REDIS_URL:
+        print("❌ REDIS_URL not found in environment variables!")
+        return
+    try:
+        app.state.redis = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+        print("✅ Successfully connected to Latinum Redis Queue")
+    except Exception as e:
+        print(f"❌ Redis Connection Error: {e}")
 
 @app.get("/")
 async def health_check():
@@ -38,27 +37,21 @@ async def submit_task(task: WorkUnit):
     if not hasattr(app.state, 'redis'):
         raise HTTPException(status_code=503, detail="Redis connection not established")
     
-    # We push to the 'latinum_task_queue' that NotebookLM mentioned
+    # Push to the specific queue name NotebookLM recommended
     await app.state.redis.rpush("latinum_task_queue", task.json())
     return {"status": "queued", "task_id": task.task_id}
 
 @app.get("/tasks/claim")
 async def claim_task(prospector_id: str):
-    """
-    Pulls a real Work Unit from Redis and formats it for 
-    Latinum V4.0 Validation (ML-KEM & SHA-256).
-    """
     if not hasattr(app.state, 'redis'):
         raise HTTPException(status_code=503, detail="Redis connection not established")
 
-    # Pop a task from the queue
     task_data = await app.state.redis.lpop("latinum_task_queue")
 
     if not task_data:
         return {"status": "idle", "message": "No Work Units currently available."}
 
     task = json.loads(task_data)
-
     return {
         "status": "success",
         "work_unit": {
