@@ -1,5 +1,6 @@
 fastapi
-uvicorn
-redis
+uvicorn[standard]
 arq
+redis
 pydantic
+python-dotenv
