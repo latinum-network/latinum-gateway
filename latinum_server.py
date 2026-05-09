@@ -6,18 +6,17 @@ from fastapi import FastAPI, HTTPException, Header
 from arq import create_pool
 from arq.connections import RedisSettings
 
-app = FastAPI(title="Latinum Refinery Gateway")
+app = FastAPI(title="Latinum AI Refinery")
 
-REDIS_URL = "redis://latinum-db:6379/0"
-RECLAMATION_TIMEOUT = 60 
-CHECK_INTERVAL = 10      
+# V3 Parameters
+RECLAMATION_TIMEOUT = 300 # 5 mins for AI training
+CHECK_INTERVAL = 30
 
 @app.on_event("startup")
 async def startup():
     try:
         app.state.redis = await create_pool(RedisSettings(host="latinum-db", port=6379))
-        count = await app.state.redis.llen("latinum:pending_shards")
-        print(f"✅ REFINERY ONLINE. Shards: {count}")
+        print("🧠 AI REFINERY ONLINE")
         asyncio.create_task(reclamation_worker())
     except Exception as e:
         print(f"❌ DATABASE STARTUP ERROR: {e}")
@@ -29,54 +28,45 @@ async def reclamation_worker():
             now = int(time.time())
             for lease_bytes in leases:
                 try:
-                    # CRITICAL FIX: Decode bytes to string
                     lease = lease_bytes.decode('utf-8')
                     parts = lease.split(":", 2)
                     if len(parts) < 3: continue
                     timestamp, sig, shard_data = parts
                     if now - int(timestamp) > RECLAMATION_TIMEOUT:
-                        print(f"⚠️ RECLAIMING: Shard from {sig} timed out.")
-                        await app.state.redis.rpush("latinum:pending_shards", shard_data)
+                        await app.state.redis.rpush("latinum:pending_training_shards", shard_data)
                         await app.state.redis.srem("latinum:processing_leases", lease_bytes)
                 except Exception: continue
-        except Exception as e: print(f"🛡️ WORKER ERROR: {e}")
+        except Exception as e: pass
         await asyncio.sleep(CHECK_INTERVAL)
 
-@app.get("/")
-async def health():
-    if not hasattr(app.state, 'redis'): return {"status": "starting"}
-    count = await app.state.redis.llen("latinum:pending_shards")
-    return {"status": "online", "shards_available": count}
-
 @app.get("/tasks/claim")
-async def claim_task(x_hardware_sig: str = Header(None)):
+async def claim_task(x_hardware_sig: str = Header(None), x_vram_available: int = Header(0)):
     if not x_hardware_sig: raise HTTPException(status_code=400)
-    shard_raw = await app.state.redis.lpop("latinum:pending_shards")
-    if not shard_raw: return {"status": "idle"}
     
-    lease_entry = f"{int(time.time())}:{x_hardware_sig}:{shard_raw}"
-    await app.state.redis.sadd("latinum:processing_leases", lease_entry)
+    # 1. Try to get an AI Training Shard first
+    shard_raw = await app.state.redis.lpop("latinum:pending_training_shards")
     
-    return {
-        "status": "success", 
-        "work_unit": json.loads(shard_raw),
-        "lease_seconds": RECLAMATION_TIMEOUT
-    }
+    if shard_raw:
+        task = json.loads(shard_raw)
+        # 2. VRAM Gatekeeping
+        if x_vram_available < task.get("vram_required", 0):
+            await app.state.redis.rpush("latinum:pending_training_shards", shard_raw)
+            return {"status": "idle", "reason": "Insufficient VRAM"}
+        
+        lease_entry = f"{int(time.time())}:{x_hardware_sig}:{shard_raw}"
+        await app.state.redis.sadd("latinum:processing_leases", lease_entry)
+        return {"status": "success", "task": task}
+
+    return {"status": "idle"}
 
 @app.post("/tasks/submit")
 async def submit_task(payload: dict, x_hardware_sig: str = Header(None)):
-    if not x_hardware_sig: raise HTTPException(status_code=400)
     shard_id = payload.get("shard_id")
-    
     leases = await app.state.redis.smembers("latinum:processing_leases")
     for lease_bytes in leases:
-        # CRITICAL FIX: Decode Redis bytes to string for comparison
         lease = lease_bytes.decode('utf-8')
-        
-        # Resilient Match: Node ID + Shard ID
         if f":{x_hardware_sig}:" in lease and shard_id in lease:
             await app.state.redis.srem("latinum:processing_leases", lease_bytes)
-            print(f"✨ SUCCESS: {x_hardware_sig} finalized Shard {shard_id}")
-            return {"status": "accepted", "shard_id": shard_id}
-            
-    raise HTTPException(status_code=404, detail="Lease expired or not found.")
+            print(f"✨ AI SUCCESS: {x_hardware_sig} finalized {shard_id}")
+            return {"status": "accepted"}
+    raise HTTPException(status_code=404)
