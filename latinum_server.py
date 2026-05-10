@@ -25,8 +25,8 @@ app.add_middleware(
 VAULT_DB_URL = os.getenv("VAULT_DB_URL")
 NODE_SECRET = os.getenv("NODE_SECRET", "LATINUM_REFINERY_SECRET_2026")
 
-# Updated to match your specific Coolify internal container name
-REDIS_URL = os.getenv("REDIS_URL", "redis://latinum-db-ao3ummhehyagp3e1qttz47if:6379/0")
+# Using the Docker Gateway IP to ensure a guaranteed connection
+REDIS_URL = os.getenv("REDIS_URL", "redis://172.18.0.1:6379/0")
 
 # Setup Redis connection
 r_db = redis.from_url(REDIS_URL)
@@ -138,9 +138,3 @@ def init_vault_schema():
     cur = conn.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS shard_history (shard_id TEXT PRIMARY KEY, node_sig TEXT, loss_value FLOAT, finalized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
     conn.commit()
-    cur.close()
-    conn.close()
-
-# Initialize Schema on Startup
-if VAULT_DB_URL:
-    init_vault_schema()
