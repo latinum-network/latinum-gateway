@@ -22,18 +22,19 @@ app.add_middleware(
 VAULT_DB_URL = os.getenv("VAULT_DB_URL")
 NODE_SECRET = os.getenv("NODE_SECRET", "LATINUM_REFINERY_SECRET_2026")
 
-# Using Public IP to bypass Docker internal networking issues
-REDIS_URL = "redis://203.161.58.9:6379/0"
+# FIXED: Using the exact internal service name from your Coolify dashboard
+REDIS_URL = "redis://latinum-db-ao3ummhehyagp3e1qttz47if:6379/0"
 
-# Setup Redis connection with a retry fail-safe
+# Setup Redis connection
 try:
     r_db = redis.from_url(REDIS_URL, socket_timeout=2)
-except:
+except Exception as e:
+    print(f"Redis Connection Warning: {e}")
     r_db = None
 
 @app.get("/tasks/claim")
 async def claim_task(prospector_id: str = Query(None)):
-    """Pulls shards from the Redis Vault"""
+    """Pulls shards from the internal Redis Vault"""
     if r_db:
         try:
             task_raw = r_db.lpop("latinum_task_queue")
@@ -47,13 +48,13 @@ async def claim_task(prospector_id: str = Query(None)):
                     }
                 }
         except Exception as e:
-            print(f"Redis Error: {e}")
+            return {"status": "error", "message": f"Redis Read Error: {e}"}
     
-    return {"status": "idle", "message": "Queue is empty on Public IP"}
+    return {"status": "idle", "message": "Queue is empty. Feed the database."}
 
 @app.post("/tasks/submit")
 async def submit_task(request: Request):
-    """Verifies and Vaults the Work"""
+    """Verifies and Vaults the Work into Postgres"""
     try:
         data = await request.json()
         received_sig = request.headers.get("X-Latinum-Signature")
@@ -67,7 +68,7 @@ async def submit_task(request: Request):
         if not received_sig or not hmac.compare_digest(received_sig, expected_sig):
             raise HTTPException(status_code=403, detail="Invalid Node Signature")
 
-        # Record to Postgres Vault
+        # Record to Postgres Shard Archive
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
         cur.execute(
@@ -83,7 +84,7 @@ async def submit_task(request: Request):
 
 @app.get("/stats")
 async def get_stats():
-    """Live JSON Feed for Ticker"""
+    """Live JSON Feed for the Website Ticker"""
     try:
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
@@ -93,6 +94,29 @@ async def get_stats():
         cu = cur.fetchone()[0] or 0
         cur.close()
         conn.close()
-        return {"total_shards_vaulted": shards, "total_complexity_units": cu, "status": "Operational", "active_nodes_24h": 1}
+        return {
+            "network_name": "Latinum Mainnet (Beta)",
+            "total_shards_vaulted": shards,
+            "total_complexity_units": cu,
+            "active_nodes_24h": 1,
+            "status": "Operational"
+        }
     except:
         return {"status": "Offline"}
+
+@app.get("/results", response_class=HTMLResponse)
+async def get_results():
+    """Live Web Dashboard for the Vault"""
+    try:
+        conn = psycopg2.connect(VAULT_DB_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT shard_id, node_sig, finalized_at FROM shard_history ORDER BY finalized_at DESC LIMIT 50;")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        html = "<html><body style='font-family:monospace; background:#0d1117; color:#58a6ff; padding:40px;'><h1>💎 LATINUM VAULT ARCHIVE</h1><hr>"
+        html += "<table border='1' style='width:100%; border-collapse:collapse;'>"
+        for row in rows: html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+        return html + "</table></body></html>"
+    except Exception as e:
+        return f"<h1>Syncing...</h1>"
