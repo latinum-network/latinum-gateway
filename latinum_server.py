@@ -24,7 +24,7 @@ NODE_SECRET = os.getenv("NODE_SECRET", "LATINUM_REFINERY_SECRET_2026")
 
 # DYNAMIC REDIS: This pulls the connection string directly from Coolify's environment
 # If not found, it defaults to the local loopback for safety
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+REDIS_URL = "redis://172.18.0.1:6379/0"
 
 print(f"📡 NODE STARTUP: Attempting connection to Redis at {REDIS_URL}")
 
