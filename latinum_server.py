@@ -4,12 +4,15 @@ import hashlib
 import json
 import psycopg2
 import redis
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+# 1. Initialize App
 app = FastAPI(title="Latinum AI Refinery & Vault")
 
+# 2. Add CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,27 +25,23 @@ app.add_middleware(
 VAULT_DB_URL = os.getenv("VAULT_DB_URL")
 NODE_SECRET = os.getenv("NODE_SECRET", "LATINUM_REFINERY_SECRET_2026")
 
-# DYNAMIC REDIS: This pulls the connection string directly from Coolify's environment
-# If not found, it defaults to the local loopback for safety
-REDIS_URL = "redis://127.0.0.1:6379/0"
+# Use the internal service name defined in Coolify
+REDIS_URL = os.getenv("REDIS_URL", "redis://latinum-db-ao3ummhehyagp3e1qttz47if:6379/0")
 
-print(f"📡 NODE STARTUP: Attempting connection to Redis at {REDIS_URL}")
-
+# Setup Redis connection
+r_db = None
 try:
     r_db = redis.from_url(REDIS_URL, socket_timeout=3)
-    # Test connection immediately
     r_db.ping()
-    print("✅ DATABASE CONNECTED: Bridge is stable.")
+    print(f"✅ DATABASE CONNECTED: Bridge is stable at {REDIS_URL}")
 except Exception as e:
     print(f"❌ DATABASE OFFLINE: {e}")
-    r_db = None
 
 @app.get("/tasks/claim")
 async def claim_task(prospector_id: str = Query(None)):
     """Pulls shards from the Redis queue"""
     if not r_db:
         return {"status": "error", "message": "API disconnected from Database"}
-        
     try:
         task_raw = r_db.lpop("latinum_task_queue")
         if task_raw:
@@ -75,6 +74,7 @@ async def submit_task(request: Request):
         if not received_sig or not hmac.compare_digest(received_sig, expected_sig):
             raise HTTPException(status_code=403, detail="Invalid Node Signature")
 
+        # Record to Postgres Vault
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
         cur.execute(
@@ -100,7 +100,12 @@ async def get_stats():
         cu = cur.fetchone()[0] or 0
         cur.close()
         conn.close()
-        return {"total_shards_vaulted": shards, "total_complexity_units": cu, "status": "Operational"}
+        return {
+            "total_shards_vaulted": shards, 
+            "total_complexity_units": cu, 
+            "status": "Operational",
+            "active_nodes_24h": 1
+        }
     except:
         return {"status": "Offline"}
 
@@ -120,3 +125,7 @@ async def get_results():
         return html + "</table></body></html>"
     except Exception as e:
         return f"<h1>Syncing...</h1>"
+
+# 🚀 CRITICAL: This ensures the server binds to Port 8000 for Coolify
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
