@@ -12,15 +12,17 @@ app = FastAPI(title="Latinum AI Refinery & Vault")
 # --- CONFIGURATION ---
 RECLAMATION_TIMEOUT = 300
 CHECK_INTERVAL = 30
+# Loaded from your Coolify Environment Variables
 VAULT_DB_URL = os.getenv("VAULT_DB_URL") 
 
 # --- STARTUP LOGIC ---
 @app.on_event("startup")
 async def startup():
     try:
-        # Connect to internal Coolify Redis
+        # Connect to internal Coolify Redis (latinum-db)
         app.state.redis = await create_pool(RedisSettings(host="latinum-db", port=6379))
         
+        # Initialize PostgreSQL Schema if URL is present
         if VAULT_DB_URL:
             init_vault_schema()
             
@@ -34,11 +36,9 @@ async def startup():
 @app.get("/tasks/claim")
 async def claim_task(prospector_id: str = Query(None)):
     """
-    Claims a granular Work Unit. 
-    'prospector_id' is now optional to prevent 400 Bad Request errors.
+    Claims a granular Work Unit from the Redis queue.
     """
     try:
-        # Pull task from Redis queue
         task_raw = await app.state.redis.lpop("latinum_task_queue")
         
         if not task_raw:
@@ -57,19 +57,47 @@ async def claim_task(prospector_id: str = Query(None)):
             }
         }
         
-        # Track active task
+        # Track active task in Redis for reclamation timeout
         await app.state.redis.setex(f"active_task:{work_unit['work_unit_id']}", RECLAMATION_TIMEOUT, node_name)
         
         print(f"🚀 TASK CLAIMED: {work_unit['work_unit_id']} by {node_name}")
         return {"status": "success", "work_unit": work_unit}
         
     except Exception as e:
-        # Return error as JSON instead of crashing
         return {"status": "error", "message": str(e)}
 
-# --- VAULT & RECLAMATION LOGIC ---
+@app.post("/tasks/submit")
+async def submit_task(data: dict):
+    """
+    Receives refinement results from Prospectors and archives them in the Vault.
+    """
+    try:
+        if not VAULT_DB_URL:
+            raise HTTPException(status_code=500, detail="Vault Database not configured.")
+
+        conn = psycopg2.connect(VAULT_DB_URL)
+        cur = conn.cursor()
+        
+        # Insert result into shard_history
+        cur.execute(
+            "INSERT INTO shard_history (shard_id, node_sig, loss_value) VALUES (%s, %s, %s)",
+            (data.get('task_id'), data.get('node_id'), 0.0) 
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        print(f"🔒 RESULT VAULTED: {data.get('task_id')} from {data.get('node_id')}")
+        return {"status": "success", "message": "Result archived in Vault."}
+    except Exception as e:
+        print(f"❌ VAULT ERROR: {e}")
+        return {"status": "error", "message": str(e)}
+
+# --- VAULT SCHEMA & RECLAMATION ---
 
 def init_vault_schema():
+    """Ensures the PostgreSQL table exists for result archiving."""
     try:
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
@@ -84,10 +112,12 @@ def init_vault_schema():
         conn.commit()
         cur.close()
         conn.close()
+        print("🏛️ Vault Schema Verified.")
     except Exception as e:
         print(f"⚠️ VAULT SCHEMA ERROR: {e}")
 
 async def reclamation_worker():
+    """Background task to monitor stuck work units (Placeholder logic)."""
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
 
