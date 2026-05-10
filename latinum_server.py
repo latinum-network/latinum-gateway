@@ -109,4 +109,12 @@ async def submit_task(data: dict):
     conn.commit()
     cur.close()
     conn.close()
-    return {"
+    return {"status": "success"}
+
+def init_vault_schema():
+    conn = psycopg2.connect(VAULT_DB_URL)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS shard_history (shard_id TEXT PRIMARY KEY, node_sig TEXT, loss_value FLOAT, finalized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
+    conn.commit()
+    cur.close()
+    conn.close()
