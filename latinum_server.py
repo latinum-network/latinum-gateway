@@ -21,10 +21,12 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-# Configuration
+# --- CONFIGURATION ---
 VAULT_DB_URL = os.getenv("VAULT_DB_URL")
 NODE_SECRET = os.getenv("NODE_SECRET", "LATINUM_REFINERY_SECRET_2026")
-REDIS_URL = os.getenv("REDIS_URL", "redis://latinum-db:6379/0")
+
+# Updated to match your specific Coolify internal container name
+REDIS_URL = os.getenv("REDIS_URL", "redis://latinum-db-ao3ummhehyagp3e1qttz47if:6379/0")
 
 # Setup Redis connection
 r_db = redis.from_url(REDIS_URL)
@@ -59,7 +61,7 @@ async def submit_task(request: Request):
         data = await request.json()
         received_sig = request.headers.get("X-Latinum-Signature")
         
-        # Verify the 'Quantum Seal' Signature
+        # Verify the HMAC Signature (The 'Quantum Seal')
         expected_sig = hmac.new(
             NODE_SECRET.encode(), 
             data['task_id'].encode(), 
