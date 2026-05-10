@@ -3,7 +3,7 @@ import asyncio
 import json
 import time
 import psycopg2
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Query
 from arq import create_pool
 from arq.connections import RedisSettings
 
@@ -12,7 +12,7 @@ app = FastAPI(title="Latinum AI Refinery & Vault")
 # --- CONFIGURATION ---
 RECLAMATION_TIMEOUT = 300
 CHECK_INTERVAL = 30
-VAULT_DB_URL = os.getenv("VAULT_DB_URL") # Provided via Coolify Env
+VAULT_DB_URL = os.getenv("VAULT_DB_URL") 
 
 # --- STARTUP LOGIC ---
 @app.on_event("startup")
@@ -21,58 +21,55 @@ async def startup():
         # Connect to internal Coolify Redis
         app.state.redis = await create_pool(RedisSettings(host="latinum-db", port=6379))
         
-        # Initialize SQL Vault Schema
         if VAULT_DB_URL:
             init_vault_schema()
             
         print("🧠 AI REFINERY & 🔒 VAULT ONLINE")
-        # Start the background worker for task reclamation
         asyncio.create_task(reclamation_worker())
     except Exception as e:
         print(f"❌ STARTUP ERROR: {e}")
 
-# --- TASK MANAGEMENT (THE NEW ENDPOINT) ---
+# --- TASK MANAGEMENT ---
 
 @app.get("/tasks/claim")
-async def claim_task(prospector_id: str):
+async def claim_task(prospector_id: str = Query(None)):
     """
-    Claims a granular Work Unit for a Prospector node.
-    Matches Latinum V4.0 requirements for CU Tiering and Result Hashing.
+    Claims a granular Work Unit. 
+    'prospector_id' is now optional to prevent 400 Bad Request errors.
     """
     try:
-        # Pop a task from the Redis queue (LPOP)
+        # Pull task from Redis queue
         task_raw = await app.state.redis.lpop("latinum_task_queue")
         
         if not task_raw:
-            return {"status": "idle", "message": "No Work Units currently available."}
+            return {"status": "idle", "message": "No Work Units available."}
 
         task = json.loads(task_raw)
+        node_name = prospector_id or "UNKNOWN_NODE"
         
-        # Structure the payload for the Prospector
         work_unit = {
             "work_unit_id": task.get("task_id", f"LAT-WU-{int(time.time())}"),
-            "assigned_prospector": prospector_id,
-            "execution_environment": "DinD",
-            "cu_reward_tier": task.get("cu_tier", 10), # Default 10 CUs
+            "assigned_prospector": node_name,
+            "cu_reward_tier": task.get("cu_tier", 10),
             "validation_protocol": {
                 "method": "sha256_result_hashing",
                 "consensus_required": True
             }
         }
         
-        # Log the claim for reclamation tracking
-        await app.state.redis.setex(f"active_task:{work_unit['work_unit_id']}", RECLAMATION_TIMEOUT, prospector_id)
+        # Track active task
+        await app.state.redis.setex(f"active_task:{work_unit['work_unit_id']}", RECLAMATION_TIMEOUT, node_name)
         
-        print(f"🚀 TASK CLAIMED: {work_unit['work_unit_id']} by {prospector_id}")
+        print(f"🚀 TASK CLAIMED: {work_unit['work_unit_id']} by {node_name}")
         return {"status": "success", "work_unit": work_unit}
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gateway Claim Error: {str(e)}")
+        # Return error as JSON instead of crashing
+        return {"status": "error", "message": str(e)}
 
 # --- VAULT & RECLAMATION LOGIC ---
 
 def init_vault_schema():
-    """Ensures the permanent Vault tables exist in PostgreSQL."""
     try:
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
@@ -88,3 +85,12 @@ def init_vault_schema():
         cur.close()
         conn.close()
     except Exception as e:
+        print(f"⚠️ VAULT SCHEMA ERROR: {e}")
+
+async def reclamation_worker():
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "online", "network": "Latinum Refinery"}
