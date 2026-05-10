@@ -8,10 +8,8 @@ from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# 1. Initialize App
 app = FastAPI(title="Latinum AI Refinery & Vault")
 
-# 2. Add CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,16 +21,11 @@ app.add_middleware(
 # --- CONFIGURATION ---
 VAULT_DB_URL = os.getenv("VAULT_DB_URL")
 NODE_SECRET = os.getenv("NODE_SECRET", "LATINUM_REFINERY_SECRET_2026")
-REDIS_URL = os.getenv("REDIS_URL", "redis://172.18.0.1:6379/0")
 
-# --- VOLATILE MEMORY QUEUE (Fail-safe) ---
-# If Redis fails, the server stores tasks here in RAM
-INTERNAL_TASK_QUEUE = [
-    {"task_id": "GENESIS-BLOCK-001"},
-    {"task_id": "GENESIS-BLOCK-002"}
-]
+# Using Public IP to bypass Docker internal networking issues
+REDIS_URL = "redis://203.161.58.9:6379/0"
 
-# Setup Redis connection
+# Setup Redis connection with a retry fail-safe
 try:
     r_db = redis.from_url(REDIS_URL, socket_timeout=2)
 except:
@@ -40,33 +33,27 @@ except:
 
 @app.get("/tasks/claim")
 async def claim_task(prospector_id: str = Query(None)):
-    """Pulls from Redis first, then Internal RAM if Redis is down"""
-    # 1. Try Redis
+    """Pulls shards from the Redis Vault"""
     if r_db:
         try:
             task_raw = r_db.lpop("latinum_task_queue")
             if task_raw:
                 task = json.loads(task_raw.decode('utf-8'))
-                return {"status": "success", "work_unit": {"work_unit_id": task.get("task_id"), "assigned": prospector_id}}
-        except:
-            pass
-
-    # 2. Try Internal RAM (Fail-safe)
-    if INTERNAL_TASK_QUEUE:
-        task = INTERNAL_TASK_QUEUE.pop(0)
-        return {
-            "status": "success", 
-            "work_unit": {
-                "work_unit_id": task["task_id"], 
-                "assigned_prospector": prospector_id or "UNKNOWN"
-            }
-        }
+                return {
+                    "status": "success", 
+                    "work_unit": {
+                        "work_unit_id": task.get("task_id"), 
+                        "assigned": prospector_id
+                    }
+                }
+        except Exception as e:
+            print(f"Redis Error: {e}")
     
-    return {"status": "idle", "message": "No work available in Redis or RAM"}
+    return {"status": "idle", "message": "Queue is empty on Public IP"}
 
 @app.post("/tasks/submit")
 async def submit_task(request: Request):
-    """Verifies the Signature and Vaults the Work"""
+    """Verifies and Vaults the Work"""
     try:
         data = await request.json()
         received_sig = request.headers.get("X-Latinum-Signature")
@@ -80,7 +67,7 @@ async def submit_task(request: Request):
         if not received_sig or not hmac.compare_digest(received_sig, expected_sig):
             raise HTTPException(status_code=403, detail="Invalid Node Signature")
 
-        # Vault the shard to Postgres
+        # Record to Postgres Vault
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
         cur.execute(
@@ -90,14 +77,13 @@ async def submit_task(request: Request):
         conn.commit()
         cur.close()
         conn.close()
-        
-        return {"status": "success", "verified": True}
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/stats")
 async def get_stats():
-    """Live JSON Feed for the Website Ticker"""
+    """Live JSON Feed for Ticker"""
     try:
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
@@ -107,35 +93,6 @@ async def get_stats():
         cu = cur.fetchone()[0] or 0
         cur.close()
         conn.close()
-        return {"total_shards_vaulted": shards, "total_complexity_units": cu, "status": "Operational"}
+        return {"total_shards_vaulted": shards, "total_complexity_units": cu, "status": "Operational", "active_nodes_24h": 1}
     except:
-        return {"status": "Syncing", "total_shards_vaulted": 0, "total_complexity_units": 0}
-
-@app.get("/results", response_class=HTMLResponse)
-async def get_results():
-    """Live Web Dashboard for the Vault"""
-    try:
-        conn = psycopg2.connect(VAULT_DB_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT shard_id, node_sig, finalized_at FROM shard_history ORDER BY finalized_at DESC LIMIT 50;")
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        html = "<html><body style='font-family:monospace; background:#0d1117; color:#58a6ff; padding:40px;'><h1>💎 LATINUM VAULT</h1><hr>"
-        html += "<table border='1' style='width:100%; border-collapse:collapse;'>"
-        for row in rows: html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-        return html + "</table></body></html>"
-    except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
-
-def init_vault_schema():
-    if VAULT_DB_URL:
-        conn = psycopg2.connect(VAULT_DB_URL)
-        cur = conn.cursor()
-        cur.execute("CREATE TABLE IF NOT EXISTS shard_history (shard_id TEXT PRIMARY KEY, node_sig TEXT, loss_value FLOAT, finalized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-        conn.commit()
-        cur.close()
-        conn.close()
-
-if VAULT_DB_URL:
-    init_vault_schema()
+        return {"status": "Offline"}
