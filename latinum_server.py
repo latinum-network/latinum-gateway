@@ -5,10 +5,21 @@ import time
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from arq import create_pool
 from arq.connections import RedisSettings
 
 app = FastAPI(title="Latinum AI Refinery & Vault")
+
+# --- HARDENING: CORS MIDDLEWARE ---
+# This allows your WordPress site to pull the Live Ticker data
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Environment Variables
 VAULT_DB_URL = os.getenv("VAULT_DB_URL") 
@@ -60,14 +71,13 @@ async def get_network_stats():
 
 @app.get("/results", response_class=HTMLResponse)
 async def get_results():
-    """Live Web Dashboard with CU Reward Calculation"""
+    """Live Web Dashboard for the Vault"""
     try:
         conn = psycopg2.connect(VAULT_DB_URL)
         cur = conn.cursor()
         cur.execute("SELECT shard_id, node_sig, finalized_at FROM shard_history ORDER BY finalized_at DESC LIMIT 50;")
         rows = cur.fetchall()
         
-        # Calculation Logic for UI
         total_cu = 0
         for row in rows:
             if "REAL-DATA" in row[0] or "QUANTUM" in row[0]:
